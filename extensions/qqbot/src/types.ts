@@ -1,5 +1,13 @@
 import type { SecretInput } from "openclaw/plugin-sdk/secret-input";
 
+/** Streaming configuration for real-time message delivery. */
+export interface QQBotStreamingConfig {
+  /** Streaming mode: "partial" sends blocks as they arrive, "off" buffers until final. */
+  mode?: "off" | "partial";
+  /** Minimum interval between sends in ms (default 500). Reserved for rate-limit mitigation. */
+  throttleMs?: number;
+}
+
 /** QQ Bot base config. */
 export interface QQBotConfig {
   appId: string;
@@ -57,6 +65,8 @@ export interface QQBotAccountConfig {
    * - "hot-reload": run an in-place npm update flow
    */
   upgradeMode?: "doc" | "hot-reload";
+  /** Streaming configuration for real-time message delivery. */
+  streaming?: QQBotStreamingConfig;
 }
 
 /** Audio format policy controlling which formats can skip transcoding. */
