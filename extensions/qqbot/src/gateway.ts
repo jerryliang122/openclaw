@@ -863,6 +863,13 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           let timeoutId: ReturnType<typeof setTimeout> | null = null;
           let toolOnlyTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
+          // Streaming configuration: read from account config
+          const qqbotStreamingCfg = (account.config?.streaming ?? {}) as {
+            mode?: string;
+            throttleMs?: number;
+          };
+          const streamingEnabled = (qqbotStreamingCfg.mode ?? "partial") !== "off";
+
           const sendToolFallback = async (): Promise<void> => {
             if (toolMediaUrls.length > 0) {
               log?.info(
@@ -1151,7 +1158,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                 },
               },
               replyOptions: {
-                disableBlockStreaming: true,
+                disableBlockStreaming: !streamingEnabled,
               },
             });
 
