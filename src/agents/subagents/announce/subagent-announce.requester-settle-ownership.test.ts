@@ -4,7 +4,7 @@ import { publishSystemEventStoreResolver } from "../../../infra/system-event-own
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
 import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
 
-const { registryRuntimeMock, deliverSpy } = vi.hoisted(() => ({
+const { registryRuntimeMock, deliverSpy, gatewayContextControl } = vi.hoisted(() => ({
   registryRuntimeMock: {
     countActiveDescendantRuns: vi.fn(() => 0),
     hasDescendantRunAwaitingSettle: vi.fn(() => false),
@@ -13,12 +13,24 @@ const { registryRuntimeMock, deliverSpy } = vi.hoisted(() => ({
     getLatestLiveSubagentRunByChildSessionKey: vi.fn(() => undefined),
   },
   deliverSpy: vi.fn<(params: Record<string, unknown>) => Promise<SubagentAnnounceDeliveryResult>>(),
+  // Undefined keeps the pre-existing "no captured gateway owner" path, where an
+  // unavailable owner spends no delivery budget. Tests that need a captured owner
+  // install a resolver here and retire it again afterwards.
+  gatewayContextControl: { current: undefined as { context?: unknown } | undefined },
 }));
 
 vi.mock("../../../config/config.js", () => ({ getRuntimeConfig: () => ({}) }));
 vi.mock("../registry/subagent-registry-read.js", () => registryRuntimeMock);
 vi.mock("../spawn/subagent-depth.js", () => ({ getSubagentDepthFromSessionStore: () => 0 }));
 vi.mock("./subagent-announce.js", () => ({ hasUsableSessionEntry: () => true }));
+vi.mock("../../../plugins/runtime/gateway-request-scope.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../../plugins/runtime/gateway-request-scope.js")>();
+  return {
+    ...actual,
+    getSharedGatewayContextResolver: () => gatewayContextControl.current,
+  };
+});
 vi.mock("./subagent-announce-delivery.js", () => ({
   deliverSubagentAnnouncement: (params: Record<string, unknown>) => deliverSpy(params),
   loadRequesterSessionEntry: () => ({
@@ -89,8 +101,12 @@ function wakeParams() {
 beforeEach(() => {
   registryRuntimeMock.listSubagentRunsForRequester.mockReset().mockReturnValue([]);
   deliverSpy.mockReset().mockResolvedValue({ delivered: true, path: "direct" });
+  gatewayContextControl.current = undefined;
 });
-afterEach(() => publishSystemEventStoreResolver(undefined));
+afterEach(() => {
+  gatewayContextControl.current = undefined;
+  publishSystemEventStoreResolver(undefined);
+});
 
 it.each(["same", "before admission", "during admission"] as const)(
   "keeps yielded requester wakes in their captured store: %s",
@@ -240,4 +256,53 @@ it("leaves a rearmed yielded batch intact when an older queued wake loses author
     execute.resolve();
     await pending;
   }
+});
+
+it("defers a revoked dispatch instead of stranding the wake without a deadline", async () => {
+  const child = makeSettledChild({
+    runId: "run-b",
+    requesterStorePath: "original-store",
+    completion: { required: true, resultText: "retained child result" },
+    // The shape from #159429: the child has ended and its own delivery attempt was
+    // closed, but a yield batch still owns waking the requester for the result.
+    delivery: { status: "pending", disposition: "intentional_non_delivery" },
+    requesterSettleWake: {
+      status: "pending",
+      attemptCount: 0,
+      requesterYieldBatch: true,
+      rearmGeneration: 1,
+      batchRunIds: ["run-b"],
+    },
+  });
+  registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue([child]);
+  publishSystemEventStoreResolver(() => "original-store");
+
+  // A Gateway owner is captured when the dispatch is admitted, then goes away
+  // before the transport reports back. That revokes the dispatch in flight.
+  const capturedOwner: { context?: unknown } = { context: { id: "gateway-owner" } };
+  gatewayContextControl.current = capturedOwner;
+  deliverSpy.mockImplementationOnce(async () => {
+    capturedOwner.context = undefined;
+    return { delivered: false, path: "none", disposition: "intentional_non_delivery" };
+  });
+  const complete = vi.fn((batch: readonly SubagentRunRecord[], generation?: number) =>
+    completeBatch(batch, generation),
+  );
+
+  expect(
+    await maybeWakeRequesterAfterAllChildrenSettled({ ...wakeParams(), completeBatch: complete }),
+  ).toBe(false);
+
+  // Admission alone leaves the wake at `dispatching` with no deadline, and that
+  // state can never advance: the attempt cap is unreachable from it and the
+  // sweeper only re-dispatches. A revoked dispatch must record the retry
+  // deadline and start the bounded deferral budget instead.
+  expect(child.requesterSettleWake).toMatchObject({
+    nextAttemptAt: expect.any(Number),
+    deferralCount: 1,
+  });
+  // The obligation is deferred, not settled: the result is still owned and the
+  // batch must not be consumed while its owner is gone.
+  expect(complete).not.toHaveBeenCalled();
+  expect(child.completion?.resultText).toBe("retained child result");
 });

@@ -574,7 +574,16 @@ export async function maybeWakeRequesterAfterAllChildrenSettled(
       isRequesterCurrent() &&
       !isBatchDeliveryClosed();
     const settleRevokedBatch = (): boolean => {
-      if (isGatewayClosed() || !isBatchCurrent() || retireReplacedStore()) {
+      // A revoked dispatch must still let this batch advance: a wake left admitted
+      // at `dispatching` with no deadline is stranded, because the attempt cap is
+      // unreachable from that status and the sweeper only re-dispatches.
+      if (isGatewayClosed()) {
+        deferBatch(state);
+        return true;
+      }
+      // A replaced row, consumed wake, or newer rearm each hand the obligation to
+      // another owner, so none of them strands the row.
+      if (!isBatchCurrent() || retireReplacedStore()) {
         return true;
       }
       if (isBatchDeliveryClosed() || !isRequesterCurrent()) {
