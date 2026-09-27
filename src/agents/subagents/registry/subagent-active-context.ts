@@ -14,6 +14,7 @@ import {
 } from "../../tools/sessions-helpers.js";
 import { resolveSubagentCompletionResultText } from "../completion/subagent-completion-result.js";
 import { isSubagentRunVisibleToSession } from "./subagent-control-scope.js";
+import { isSubagentDeliverySettled } from "./subagent-delivery-state.js";
 import { buildSubagentList, captureSubagentListReadContext } from "./subagent-list.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
 import { buildSubagentRunReadIndexFromRuns } from "./subagent-registry-queries.js";
@@ -41,6 +42,13 @@ function hasOutstandingCompletion(entry: SubagentRunRecord): boolean {
     entry.killReconciliation?.suppressTaskDelivery === true ||
     entry.killIntent?.suppressTaskDelivery === true
   ) {
+    return false;
+  }
+  // A settled delivery closes the row regardless of any wake still attached to
+  // it. Hoisting this above the wake check keeps an obsolete wake from
+  // resurrecting an already delivered or discarded result in every later
+  // requester turn, which is what the wake branch below would otherwise do.
+  if (isSubagentDeliverySettled(entry)) {
     return false;
   }
   if (entry.requesterSettleWake) {

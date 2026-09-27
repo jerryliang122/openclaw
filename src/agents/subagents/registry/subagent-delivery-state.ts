@@ -248,6 +248,30 @@ export function hasRetainedRequiredCompletionDelivery(
   );
 }
 
+/**
+ * Returns true when this delivery can no longer advance.
+ *
+ * A retained requester wake is not a delivery obligation on its own: it records
+ * that the registry still intends to announce this child to its requester. Once
+ * the transport has settled the delivery, any wake still attached to the row is
+ * obsolete, and callers must not read it as "this result is still awaiting
+ * delivery".
+ *
+ * Scoped to states the renderer already treated as settled before this check
+ * existed. `suspended`, `failed`, and `permanent_failure` are deliberately
+ * excluded: they still own the row and remain separately reviewable.
+ */
+export function isSubagentDeliverySettled(entry: Pick<SubagentRunRecord, "delivery">): boolean {
+  const delivery = entry.delivery;
+  return (
+    delivery?.status === "delivered" ||
+    delivery?.status === "discarded" ||
+    delivery?.status === "not_required" ||
+    delivery?.disposition === "delivered" ||
+    delivery?.disposition === "intentional_non_delivery"
+  );
+}
+
 /** Reads the current delivery attempt count. */
 export function getDeliveryAttemptCount(entry: SubagentRunRecord): number {
   return entry.delivery?.attemptCount ?? 0;

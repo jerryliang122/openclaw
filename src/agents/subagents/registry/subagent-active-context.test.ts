@@ -385,4 +385,122 @@ describe("buildActiveSubagentRuntimeContext", () => {
     expect(laterParentTurn).toContain("run-later-parent-turn");
     expect(laterParentTurn).toContain('taskName_json="summarize_inbox"');
   });
+
+  // A terminal run older than the 30m recent window renders only through the
+  // awaiting-delivery block, so these cases isolate that block's membership.
+  const STALE_ENDED_AT = Date.now() - 3_600_000;
+  const CONTROLLER_SESSION_KEY = "agent:main:main";
+
+  const settledRun = (overrides: SubagentRunRecordOverrides) =>
+    ({
+      controllerSessionKey: CONTROLLER_SESSION_KEY,
+      requesterSessionKey: CONTROLLER_SESSION_KEY,
+      requesterDisplayKey: "main",
+      cleanup: "keep",
+      createdAt: STALE_ENDED_AT - 60_000,
+      startedAt: STALE_ENDED_AT - 60_000,
+      endedAt: STALE_ENDED_AT,
+      outcome: { status: "ok" as const },
+      expectsCompletionMessage: true,
+      completion: { required: true, resultText: "settled child result" },
+      cleanupHandled: true,
+      cleanupCompletedAt: STALE_ENDED_AT + 1_000,
+      // The live shape from #159429: a wake that never reached a terminal
+      // state because its dispatch was revoked instead of settled.
+      requesterSettleWake: {
+        status: "dispatching" as const,
+        attemptCount: 1,
+        requesterYieldBatch: true as const,
+        rearmGeneration: 1,
+        batchRunIds: [],
+      },
+      ...overrides,
+    }) satisfies SubagentRunRecordOverrides;
+
+  it("does not re-inject a settled delivery whose obsolete wake is still attached", async () => {
+    // The wake branch used to short-circuit on object presence alone, so this
+    // row re-rendered its completed result in every later requester turn even
+    // though the transport had already settled the delivery.
+    addSubagentRunForTests(
+      settledRun({
+        runId: "run-obsolete-wake-settled",
+        childSessionKey: "agent:main:subagent:obsolete-wake-settled",
+        task: "settled child",
+        delivery: { status: "pending", disposition: "intentional_non_delivery" },
+      }),
+    );
+
+    expect(
+      await buildActiveSubagentRuntimeContext({
+        cfg: {} as OpenClawConfig,
+        controllerSessionKey: CONTROLLER_SESSION_KEY,
+      }),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ["delivered", { status: "delivered" as const }],
+    ["discarded", { status: "discarded" as const }],
+    ["not_required", { status: "not_required" as const }],
+    ["non-delivery disposition", { status: "pending" as const, disposition: "delivered" as const }],
+  ])("does not re-inject a %s delivery behind a retained wake", async (_label, delivery) => {
+    addSubagentRunForTests(
+      settledRun({
+        runId: `run-obsolete-wake-${_label.replace(/\s+/g, "-")}`,
+        childSessionKey: `agent:main:subagent:obsolete-wake-${_label.replace(/\s+/g, "-")}`,
+        task: "settled child",
+        delivery,
+      }),
+    );
+
+    expect(
+      await buildActiveSubagentRuntimeContext({
+        cfg: {} as OpenClawConfig,
+        controllerSessionKey: CONTROLLER_SESSION_KEY,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("keeps an unsettled delivery in the awaiting-delivery block", async () => {
+    addSubagentRunForTests(
+      settledRun({
+        runId: "run-open-delivery-wake",
+        childSessionKey: "agent:main:subagent:open-delivery-wake",
+        task: "child still owed",
+        delivery: { status: "pending" },
+      }),
+    );
+
+    const prompt = await buildActiveSubagentRuntimeContext({
+      cfg: {} as OpenClawConfig,
+      controllerSessionKey: CONTROLLER_SESSION_KEY,
+    });
+
+    expect(prompt).toContain("## Child results awaiting delivery");
+    expect(prompt).toContain("run-open-delivery-wake");
+    expect(prompt).toContain("requester_continuation=dispatching");
+  });
+
+  it("keeps a wake ahead of a child that never required a completion message", async () => {
+    addSubagentRunForTests(
+      settledRun({
+        runId: "run-wake-no-delivery-state",
+        childSessionKey: "agent:main:subagent:wake-no-delivery-state",
+        task: "yielded continuation",
+        expectsCompletionMessage: false,
+        completion: { required: false, resultText: null },
+        delivery: undefined,
+      }),
+    );
+
+    const prompt = await buildActiveSubagentRuntimeContext({
+      cfg: {} as OpenClawConfig,
+      controllerSessionKey: CONTROLLER_SESSION_KEY,
+    });
+
+    // A row with no settled delivery keeps the pre-existing wake behaviour; this
+    // pins that the guard above only reorders an already-settled conclusion.
+    expect(prompt).toContain("## Child results awaiting delivery");
+    expect(prompt).toContain("run-wake-no-delivery-state");
+  });
 });
