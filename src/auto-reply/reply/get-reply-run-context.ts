@@ -54,6 +54,7 @@ import { buildGroupIntro, buildSourceConversationContext } from "./groups.js";
 import { CURRENT_MESSAGE_MARKER } from "./history.js";
 import { markInboundContextLabel } from "./inbound-context-marker.js";
 import { hasInboundMedia } from "./inbound-media.js";
+import { withCurrentInboundMessageIdentity } from "./inbound-message-identity.js";
 import {
   buildInboundMetaSystemPrompt,
   buildInboundUserContextPrefix,
@@ -423,7 +424,7 @@ export async function prepareReplyRunContext(params: RunPreparedReplyParams) {
           ? { InboundHistory: undefined, ThreadStarterBody: undefined }
           : {}),
       }
-    : { ...sessionCtx, ThreadStarterBody: undefined };
+    : withCurrentInboundMessageIdentity({ ...sessionCtx, ThreadStarterBody: undefined }, ctx);
   let inboundContextSessionEntry = isInternalEvent
     ? undefined
     : ((sessionKey !== undefined ? sessionStore?.[sessionKey] : undefined) ??
